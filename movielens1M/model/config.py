@@ -10,21 +10,21 @@ optimizer = 'sgd'
 learning_rate = 0.01
 dropout = 1.0
 
-feature_num = 39
-feature_size_dnn = 10000
-embedding_size_dnn = 128
+feature_num = 7
+feature_size_dnn = 20000
+feature_size_title = 5000
+feature_size_genres = 20
+
+embedding_size_dnn = 24
 
 expert_num = 3
-expert_layers = [128]
+expert_layers = [256, 128]
 task_num = 2
 task_experts = [
     (0, 1, 2),
     (0, 1, 2)
 ]
-task_layers = [80]
-
-#v1
-dnn_layers = [200, 80]
+task_layers = [64]
 
 
 

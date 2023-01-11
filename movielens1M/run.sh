@@ -9,8 +9,10 @@ gpu_device=2
 
 models_dir='./chkpt'
 profiler_dir='./progiler'
-train_data_dir='./data/train/task1'
-test_data_dir='./data/test/task1'
+# train_data_dir='./data/train'
+# test_data_dir='./data/test'
+train_data_dir='./data_shuffle/train'
+test_data_dir='./data_shuffle/test'
 
 if [ -d $models_dir ]; then
     rm -r $models_dir

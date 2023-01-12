@@ -6,11 +6,10 @@ import os
 import tensorflow.compat.v1 as tf
 
 import config
-#from model_mmoe import input_fn, model_fn
-#from model_atten import input_fn, model_fn
-#from model_coatten import input_fn, model_fn
-#from model_consistency_2 import input_fn, model_fn
-from model_v2_mmoe import input_fn, model_fn
+#from model_v2_mtl import input_fn, model_fn
+#from model_v2_mtl_consistency import input_fn, model_fn
+#from model_v2_mtl_coattention import input_fn, model_fn
+from model_v2_mtl_coattention_consistency import input_fn, model_fn
 
 tf.disable_v2_behavior()
 
@@ -30,7 +29,7 @@ def get_feature_file(data_dir, full_training_file):
 def main(_):    
     train_file_dir = sys.argv[1]
     out_model_dir = sys.argv[2]
-    profiler_dir = sys.argv[3]
+    base = sys.argv[3]
 
     is_online_training, is_eval, is_pred = False, False, False
     if len(sys.argv) > 4:
@@ -49,13 +48,13 @@ def main(_):
     c = tf.estimator.RunConfig().replace(session_config=tf.ConfigProto(device_count=gpu_info), log_step_count_steps=log_steps, save_summary_steps=log_steps, keep_checkpoint_max=1)
 
     if is_online_training:
-        MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params=None, config=c)
+        MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'base': base}, config=c)
         MTL.train(input_fn=lambda: input_fn(train_file_list, batch_size=config.batch_size, num_epochs=1))
     elif is_eval:
-        MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params=None, config=c)
+        MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'base': base}, config=c)
         MTL.evaluate(input_fn=lambda: input_fn(test_file_list, batch_size=config.batch_size, num_epochs=1))
     elif is_pred:
-        MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params=None, config=c)
+        MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'base': base}, config=c)
         for prob in MTL.predict(input_fn=lambda: input_fn(train_file_list, batch_size=config.batch_size, num_epochs=1)):
             print(prob['task1'][0], prob['task2'][0])
     else:

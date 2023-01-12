@@ -24,6 +24,10 @@ task_experts = [
     (0, 1, 2),
     (0, 1, 2)
 ]
+task_experts_ple = [
+    (0, 1),
+    (1, 2)
+]
 task_layers = [64]
 
 

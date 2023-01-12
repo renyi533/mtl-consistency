@@ -35,7 +35,26 @@ def input_fn(filenames, batch_size, num_epochs=1, perform_shuffle=False):
     # return tf.reshape(batch_ids,shape=[-1,field_size]), tf.reshape(batch_vals,shape=[-1,field_size]), batch_labels
     return batch_features, batch_labels1
 
-def mmoe(dnn_inputs, mode):
+def task_coattention(task_tower_inputs):
+    task_tower_inputs = tf.concat(task_tower_inputs, axis=-1)
+    task_tower_inputs = tf.reshape(task_tower_inputs, [-1, config.task_num, config.expert_layers[-1]])
+
+    task_tower_inputs = tf.layers.dense(task_tower_inputs, config.expert_layers[-1], activation=tf.nn.relu)
+        
+    weights = tf.matmul(task_tower_inputs, tf.transpose(task_tower_inputs, [0, 2, 1])) 
+    weights /= task_tower_inputs.get_shape().as_list()[-1]** 0.5
+    weights = tf.nn.softmax(weights)
+    task_tower_inputs = tf.matmul(weights, task_tower_inputs)  
+    task_tower_inputs = tf.reshape(task_tower_inputs, [-1, config.task_num * config.expert_layers[-1]])
+
+    outputs=[]
+    for i in range(config.task_num):
+        output = task_tower_inputs[:, i * config.expert_layers[-1] : config.expert_layers[-1]*(i + 1)] 
+        outputs.append(output)
+
+    return outputs
+    
+def mmoe(dnn_inputs, mode=None):
     all_experts = []
     for i in range(config.expert_num):
         expert_input = dnn_inputs
@@ -44,6 +63,7 @@ def mmoe(dnn_inputs, mode):
         all_experts.append(expert_input)
 
     task_outputs = []
+    task_tower_inputs = []
     expert_config = config.task_experts
     for i in range(config.task_num):
         task_tower = []
@@ -53,7 +73,12 @@ def mmoe(dnn_inputs, mode):
         gate = tf.expand_dims(gate, axis=1)
         task_experts = tf.stack(task_experts, axis=1)
         task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
-         
+        task_tower_inputs.append(task_input)
+
+    task_tower_inputs = task_coattention(task_tower_inputs)
+
+    for i in range(config.task_num):
+        task_input = task_tower_inputs[i]
         for j, node_num in enumerate(config.task_layers):
             task_input = tf.layers.dense(task_input, node_num, activation=tf.nn.relu)
             if mode == tf.estimator.ModeKeys.TRAIN:
@@ -63,6 +88,42 @@ def mmoe(dnn_inputs, mode):
         task_outputs.append(task_out)
 
     return task_outputs
+
+def ple(dnn_inputs, mode=None):
+    all_experts = []
+    for i in range(config.expert_num):
+        expert_input = dnn_inputs
+        for j, node_num in enumerate(config.expert_layers):
+            expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
+        all_experts.append(expert_input)
+
+    task_outputs = []
+    task_tower_inputs = []
+    expert_config = config.task_experts_ple
+    for i in range(config.task_num):
+        task_tower = []
+        task_experts = [all_experts[k] for k in expert_config[i]]
+        gate = tf.layers.dense(dnn_inputs, len(task_experts), activation=tf.nn.softmax)
+        #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
+        gate = tf.expand_dims(gate, axis=1)
+        task_experts = tf.stack(task_experts, axis=1)
+        task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
+        task_tower_inputs.append(task_input)
+
+    task_tower_inputs = task_coattention(task_tower_inputs)
+
+    for i in range(config.task_num):
+        task_input = task_tower_inputs[i]
+        for j, node_num in enumerate(config.task_layers):
+            task_input = tf.layers.dense(task_input, node_num, activation=tf.nn.relu)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                task_input = tf.nn.dropout(task_input, keep_prob=config.dropout)
+
+        task_out = tf.layers.dense(task_input, 1, activation=tf.identity, use_bias=False)
+        task_outputs.append(task_out)
+
+    return task_outputs
+    
 
 def model_fn(features, labels, mode=None, params=None):
  
@@ -76,7 +137,12 @@ def model_fn(features, labels, mode=None, params=None):
         #dnn_inputs = tf.reshape(dnn_inputs, [-1, config.feature_num * config.embedding_size_dnn])
         dnn_inputs = tf.reduce_sum(dnn_inputs, 1) 
 
-        task_outputs = mmoe(dnn_inputs, mode)
+        if params and params['base']:
+            if params['base']== 'mmoe':
+                task_outputs = mmoe(dnn_inputs, mode)
+            elif params['base']== 'ple':
+                task_outputs = ple(dnn_inputs, mode)
+
         y_d_task1, y_d_task2 = task_outputs[0], task_outputs[1]
         
     predictions={'task1': tf.sigmoid(y_d_task1),'task2': tf.sigmoid(y_d_task2)}

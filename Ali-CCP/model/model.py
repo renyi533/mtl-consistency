@@ -7,17 +7,21 @@ import tensorflow.compat.v1 as tf
 import config
 
 
-def input_fn(filenames, batch_size, num_epochs=1, perform_shuffle=False):
+def input_fn(filenames, batch_size, num_epochs=1, perform_shuffle=False, task_num=2):
     def decode_libsvm(line):
         columns = tf.string_split([line], ',')
-        splits = [1] * 2
+        splits = [1] * task_num
         splits.append(-1)
-        label1, label2, feat = tf.split(columns.values, num_or_size_splits=splits)
-        label1 = tf.string_to_number(label1, tf.float32)
-        label2 = tf.string_to_number(label2, tf.float32)
-        feat = tf.string_to_number(feat, tf.int64)
+        inputs = tf.split(columns.values, num_or_size_splits=splits)
+        labels = []
+        for i in range(task_num):
+            labels.append(tf.string_to_number(inputs[i], tf.float32))
+        feat = tf.string_to_number(inputs[task_num], tf.int64)
         size = tf.reshape(tf.size(feat), [1])
-        return {"size": size, "feat": feat,  'label2': label2, 'label1': label1}, label1
+        ret_dict = {"size": size, "feat": feat}
+        for i in range(task_num):
+            ret_dict['label%d'%(i)] = labels[i]
+        return ret_dict, labels[0]
 
     # Extract lines from input files using the Dataset API, can pass one filename or filename list
     dataset = tf.data.TextLineDataset(filenames).map(decode_libsvm, num_parallel_calls=config.num_threads)  # .prefetch(500000)    # multi-thread pre-process then prefetch
@@ -26,8 +30,8 @@ def input_fn(filenames, batch_size, num_epochs=1, perform_shuffle=False):
         dataset = dataset.shuffle(buffer_size=batch_size*10, reshuffle_each_iteration=True)
     # epochs from blending together.
     dataset = dataset.repeat(num_epochs)
-    # dataset = dataset.batch(batch_size)
-    dataset = dataset.padded_batch(batch_size, ({'size':[1], 'feat':[-1],  'label2':[1], 'label1':[1]}, [1]))
+    dataset = dataset.batch(batch_size)
+    #dataset = dataset.padded_batch(batch_size, ({'size':[1], 'feat':[-1],  'label2':[1], 'label1':[1]}, [1]))
     dataset = dataset.prefetch(1)  # one batch
     # return dataset.make_one_shot_iterator()
     iterator = dataset.make_one_shot_iterator()
@@ -35,32 +39,39 @@ def input_fn(filenames, batch_size, num_epochs=1, perform_shuffle=False):
     # return tf.reshape(batch_ids,shape=[-1,field_size]), tf.reshape(batch_vals,shape=[-1,field_size]), batch_labels
     return batch_features, batch_labels1
 
-def task_coattention(task_tower_inputs):
-    task_tower_inputs = tf.concat(task_tower_inputs, axis=-1)
-    task_tower_inputs = tf.reshape(task_tower_inputs, [-1, config.task_num, config.expert_layers[-1]])
+def task_coattention(original_tower_inputs, args, mode):
+    task_tower_inputs = tf.concat(original_tower_inputs, axis=-1)
+    task_tower_inputs = tf.reshape(task_tower_inputs, [-1, args.task_num, args.expert_layers[-1]])
 
-    task_tower_inputs = tf.layers.dense(task_tower_inputs, config.expert_layers[-1], activation=tf.nn.relu)
+    task_tower_inputs_Q = tf.layers.dense(task_tower_inputs, args.expert_layers[-1], activation=tf.nn.relu)
+    task_tower_inputs = tf.stop_gradient(task_tower_inputs)
+    task_tower_inputs_K = tf.layers.dense(task_tower_inputs, args.expert_layers[-1], activation=tf.nn.relu)
+    task_tower_inputs_V = tf.layers.dense(task_tower_inputs, args.expert_layers[-1], activation=tf.nn.relu)
 
-    weights = tf.matmul(task_tower_inputs, tf.transpose(task_tower_inputs, [0, 2, 1])) 
+    weights = tf.matmul(task_tower_inputs_Q, tf.transpose(task_tower_inputs_K, [0, 2, 1])) 
     weights /= task_tower_inputs.get_shape().as_list()[-1]** 0.5
     weights = tf.nn.softmax(weights)
-    task_tower_inputs = tf.matmul(weights, task_tower_inputs)  
-    task_tower_inputs = tf.reshape(task_tower_inputs, [-1, config.task_num * config.expert_layers[-1]])
+    task_tower_inputs = tf.matmul(weights, task_tower_inputs_V)  
+    task_tower_inputs = tf.reshape(task_tower_inputs, [-1, args.task_num * args.expert_layers[-1]])
 
     outputs=[]
-    for i in range(config.task_num):
-        output = task_tower_inputs[:, i * config.expert_layers[-1] : config.expert_layers[-1]*(i + 1)] 
+    for i in range(args.task_num):
+        output = task_tower_inputs[:, i * args.expert_layers[-1] : args.expert_layers[-1]*(i + 1)] + original_tower_inputs[i]
         outputs.append(output)
 
     return outputs
 
-def task_consistency(task_logits_inputs):
+def task_consistency(task_logits_inputs, args, mode):
     task_outputs = []
-    for i in range(config.task_num):
+    global_experience = tf.concat(task_logits_inputs, axis=-1)
+    for i in range(args.task_num):
         task_input = task_logits_inputs[i]
-        global_experience = tf.concat(task_logits_inputs, axis=-1)
-        global_experience = tf.layers.dense(tf.stop_gradient(global_experience), config.task_layers[-1], activation=tf.nn.relu)
-        experience_weight = tf.layers.dense(tf.concat([task_input, global_experience], axis=-1), config.task_layers[-1], activation=tf.nn.sigmoid)
+        global_experience = tf.layers.dense(tf.stop_gradient(global_experience), args.task_layers[-1], activation=tf.nn.relu)
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            global_experience = tf.nn.dropout(global_experience, keep_prob=args.keep_prob[2])
+
+        experience_weight = tf.layers.dense(tf.concat([task_input, global_experience], axis=-1), args.task_layers[-1], activation=tf.nn.relu)
+        experience_weight = tf.layers.dense(experience_weight, args.task_layers[-1], activation=tf.nn.sigmoid)
         task_input = task_input + experience_weight * global_experience
         task_out = tf.layers.dense(task_input, 1, activation=tf.identity, use_bias=False)
         task_outputs.append(task_out)
@@ -109,90 +120,87 @@ def aitm(feature_embedding, args):
         # (N,L,K)
         outputs = tf.multiply(a[:, :, None], V)
         return tf.reduce_sum(outputs, axis=1)  # (N, K)
+    
+    def _gen_tower(feature_embedding, info, idx):
+      with tf.variable_scope('task_%d' % idx):
+        tower_out = tf.keras.layers.Dense(
+            128, activation='relu')(feature_embedding)
+        tower_out = tf.keras.layers.Dropout(
+            1 - args.keep_prob[0])(tower_out)
+        tower_out = tf.keras.layers.Dense(
+            64, activation='relu')(tower_out)
+        tower_out = tf.keras.layers.Dropout(
+            1 - args.keep_prob[1])(tower_out)
+        tower_out = tf.keras.layers.Dense(
+            32, activation='relu')(tower_out)
+        tower_out = tf.keras.layers.Dropout(
+            1 - args.keep_prob[2])(tower_out)
+        if info is None:
+            ait = tower_out
+        else:
+            ait = _attention(tower_out, info)
 
-    tower_click = tf.keras.layers.Dense(
-        128, activation='relu')(feature_embedding)
-    tower_click = tf.keras.layers.Dropout(
-        1 - 0.9)(tower_click)
-    tower_click = tf.keras.layers.Dense(
-        64, activation='relu')(tower_click)
-    tower_click = tf.keras.layers.Dropout(
-        1 - 0.7)(tower_click)
-    tower_click = tf.keras.layers.Dense(
-        32, activation='relu')(tower_click)
-    tower_click = tf.keras.layers.Dropout(
-        1 - 0.7)(tower_click)
-    info = tf.keras.layers.Dense(
-        32, activation='relu')(
-        tower_click)
-    info = tf.keras.layers.Dropout(
-        1 - 0.7)(info)
-
-    tower_purchase = tf.keras.layers.Dense(
-        128, activation='relu')(feature_embedding)
-    tower_purchase = tf.keras.layers.Dropout(
-        1 - 0.9)(tower_purchase)
-    tower_purchase = tf.keras.layers.Dense(
-        64, activation='relu')(tower_purchase)
-    tower_purchase = tf.keras.layers.Dropout(
-        1 - 0.7)(tower_purchase)
-    tower_purchase = tf.keras.layers.Dense(
-        32, activation='relu')(tower_purchase)
-    tower_purchase = tf.keras.layers.Dropout(
-        1 - 0.7)(tower_purchase)
-    ait = _attention(tower_purchase, info)
-
-    click = tf.keras.layers.Dense(1)(tower_click)
-    purchase = tf.keras.layers.Dense(1)(ait)
-    task_outputs = [click, purchase]
+        info = tf.keras.layers.Dense(
+            32, activation='relu')(
+            ait)
+        info = tf.keras.layers.Dropout(
+            1 - args.keep_prob[2])(info)
+        return ait, info
+    
+    task_outputs = []
+    info = None
+    for i in range(args.task_num):
+        ait, info = _gen_tower(feature_embedding, info, i)
+        task_out = tf.keras.layers.Dense(1)(ait)   
+        task_outputs.append(task_out)
     return task_outputs
      
-def model(dnn_inputs, args, mode=None):
+def model(dnn_inputs, args, mode):
     if args.model == 'mmoe':
-        task_tower_inputs = mmoe(dnn_inputs, args)
+        task_tower_inputs = mmoe(dnn_inputs, args, mode)
     elif args.model == 'ple':
-        task_tower_inputs = ple(dnn_inputs, args)
+        task_tower_inputs = ple(dnn_inputs, args, mode)
     elif args.model == 'aitm':
         return aitm(dnn_inputs, args)
     else:
         assert False
             
     if args.co_attention:
-        task_tower_inputs = task_coattention(task_tower_inputs)
+        task_tower_inputs = task_coattention(task_tower_inputs, args, mode)
     task_outputs = []
     task_logits_inputs = []
-    for i in range(config.task_num):
+    for i in range(args.task_num):
         task_input = task_tower_inputs[i]
-        for j, node_num in enumerate(config.task_layers):
+        for j, node_num in enumerate(args.task_layers):
             task_input = tf.layers.dense(task_input, node_num, activation=tf.nn.relu)
             if mode == tf.estimator.ModeKeys.TRAIN:
-                task_input = tf.nn.dropout(task_input, keep_prob=args.keep_prob)
+                task_input = tf.nn.dropout(task_input, keep_prob=args.keep_prob[1])
         task_logits_inputs.append(task_input)
 
         task_out = tf.layers.dense(task_input, 1, activation=tf.identity, use_bias=True)
         task_outputs.append(task_out)
 
     if args.global_experience:
-        task_outputs_consistency = task_consistency(task_logits_inputs)
-        for i in range(config.task_num):
+        task_outputs_consistency = task_consistency(task_logits_inputs, args, mode)
+        for i in range(args.task_num):
             task_outputs[i] += task_outputs_consistency[i]
         
     return task_outputs
 
-def mmoe(dnn_inputs, mode=None):
+def mmoe(dnn_inputs, args, mode):
     all_experts = []
-    for i in range(config.expert_num):
+    for i in range(args.expert_num):
         expert_input = dnn_inputs
-        for j, node_num in enumerate(config.expert_layers):
+        for j, node_num in enumerate(args.expert_layers):
             expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
         all_experts.append(expert_input)
 
-    task_outputs = []
     task_tower_inputs = []
-    expert_config = config.task_experts
-    for i in range(config.task_num):
+    for i in range(args.task_num):
         task_tower = []
-        task_experts = [all_experts[k] for k in expert_config[i]]
+        task_experts = [all_experts[k] for k in range(args.expert_num)]
         gate = tf.layers.dense(dnn_inputs, len(task_experts), activation=tf.nn.softmax)
         #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
         gate = tf.expand_dims(gate, axis=1)
@@ -204,34 +212,51 @@ def mmoe(dnn_inputs, mode=None):
 
     return task_tower_inputs
 
-def ple(dnn_inputs, mode=None):
+def ple(dnn_inputs, args, mode):
     all_experts = []
-    for i in range(config.expert_num):
+    for i in range(args.expert_num):
         expert_input = dnn_inputs
-        for j, node_num in enumerate(config.expert_layers):
+        for j, node_num in enumerate(args.expert_layers):
             expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
         all_experts.append(expert_input)
 
-    task_outputs = []
     task_tower_inputs = []
-    expert_config = config.task_experts_ple
-    for i in range(config.task_num):
-        task_tower = []
-        task_experts = [all_experts[k] for k in expert_config[i]]
+    cgc_outputs = []
+    for i in range(args.expert_num):
+        if i < args.task_num:
+            task_experts = [all_experts[i]]
+            task_experts.extend([all_experts[k] for k in range(args.task_num, args.expert_num)])
+        else:
+            task_experts = [all_experts[k] for k in range(args.expert_num)]
+            
         gate = tf.layers.dense(dnn_inputs, len(task_experts), activation=tf.nn.softmax)
         #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
         gate = tf.expand_dims(gate, axis=1)
         task_experts = tf.stack(task_experts, axis=1)
         task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
+        cgc_outputs.append(task_input)
+ 
+    for i in range(args.task_num):
+        task_experts = [cgc_outputs[i]]
+        task_experts.extend([cgc_outputs[k] for k in range(args.task_num, args.expert_num)])
+        gate = tf.layers.dense(cgc_outputs[i], len(task_experts), activation=tf.nn.softmax)
+        #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
+        gate = tf.expand_dims(gate, axis=1)
+        task_experts = tf.stack(task_experts, axis=1)
+        task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
         task_tower_inputs.append(task_input)
-
     return task_tower_inputs
     
 
 def model_fn(features, labels, mode=None, params=None):
  
     args = params['args']
-    feat_dnn, size, labels2 = features['feat'],  features['size'], features['label2']
+    feat_dnn, size = features['feat'],  features['size']
+    task_labels = []
+    for i in range(args.task_num):
+        task_labels.append(features['label%d' % (i)])
 
     uniq_feature_cnt = args.uniq_feature_cnt
     slot_cnt = len(uniq_feature_cnt)
@@ -252,22 +277,34 @@ def model_fn(features, labels, mode=None, params=None):
         dnn_inputs = tf.concat(dnn_inputs, axis=-1) 
         dnn_inputs = tf.squeeze(dnn_inputs, axis=-2)
         
-        task_outputs = model(dnn_inputs, args)
-        y_d_task1, y_d_task2 = task_outputs[0], task_outputs[1]
+        task_outputs = model(dnn_inputs, args, mode)
+        task_preds = []
+        for i in range(args.task_num):
+            if args.task_loss[i] == 'xent':
+                pred = tf.sigmoid(task_outputs[i])
+            else:
+                pred = task_outputs[i]
+            task_preds.append(pred)
     
-    pred_task1 = tf.sigmoid(y_d_task1)
-    pred_task2 = tf.sigmoid(y_d_task2)#*pred_task1    
-    predictions={'task1': pred_task1,'task2': pred_task2,'task1_l': features['label1'], 'task2_l': labels2}
+    predictions = {}
+    for i in range(args.task_num):
+        predictions['task%d'%i]=task_preds[i]
+        predictions['task%d_l'%i]=task_labels[i]
 
     # Provide an estimator spec for `ModeKeys.PREDICT`
     if mode == tf.estimator.ModeKeys.PREDICT:
         return tf.estimator.EstimatorSpec(
                 mode=mode,
                 predictions=predictions)
-    
-    loss = tf.losses.log_loss(labels, pred_task1) + tf.losses.log_loss(labels2, pred_task2) 
-    #loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=y_d_task1, labels=labels)) \
-    #        +  tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=y_d_task2, labels=labels2))
+    loss = 0
+    for i in range(args.task_num):
+        if args.task_loss[i] == 'xent':
+            loss = loss + tf.losses.log_loss(task_labels[i], task_preds[i])
+        elif args.task_loss[i] == 'mse':
+            loss = loss + tf.losses.mean_squared_error(task_labels[i], task_preds[i])
+        else:
+            assert False
+ 
     reg_variables = tf.get_collection(
         tf.GraphKeys.REGULARIZATION_LOSSES)
     if args.lamda > 0:
@@ -278,10 +315,16 @@ def model_fn(features, labels, mode=None, params=None):
    
     # Provide an estimator spec for `ModeKeys.EVAL`
     ROC_bucket = 20000
-    auc1 = tf.metrics.auc(labels, pred_task1, num_thresholds=ROC_bucket, curve='ROC')
-    auc2 = tf.metrics.auc(labels2,pred_task2, num_thresholds=ROC_bucket, curve='ROC')
-    auc = (auc1[0] + auc2[0]) / 2
-    eval_metric_ops = { "auc1": auc1, "auc2": auc2, "auc": auc }
+    eval_metric_ops = {}
+    metric_sum = 0.0
+    for i in range(args.task_num):
+        if args.task_loss[i] == 'xent':
+            eval_metric_ops['auc_%d'%i] = tf.metrics.auc(task_labels[i], task_preds[i], num_thresholds=ROC_bucket, curve='ROC')
+            metric_sum = metric_sum + eval_metric_ops['auc_%d'%i][0]
+        else:
+            eval_metric_ops['mse_%d'%i] = tf.metrics.mean_squared_error(task_labels[i], task_preds[i])
+            metric_sum = metric_sum + eval_metric_ops['mse_%d'%i][0]
+    eval_metric_ops['metric_sum'] = (metric_sum, tf.no_op())
     if mode == tf.estimator.ModeKeys.EVAL:
         return tf.estimator.EstimatorSpec(
                 mode=mode,
@@ -295,11 +338,9 @@ def model_fn(features, labels, mode=None, params=None):
         optimizer = tf.train.AdagradOptimizer(learning_rate=args.lr, initial_accumulator_value=1e-8)
     elif args.optimizer == 'Momentum':
         optimizer = tf.train.MomentumOptimizer(learning_rate=args.lr, momentum=0.95)
-    elif args.optimizer == 'ftrl':
-        optimizer = tf.train.FtrlOptimizer(args.lr)
     else:  # 'sgd'
         optimizer = tf.train.GradientDescentOptimizer(args.lr)
-
+    print(args.optimizer, optimizer)
     train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
 
     # Provide an estimator spec for `ModeKeys.TRAIN` modes

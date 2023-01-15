@@ -7,7 +7,7 @@ import tensorflow.compat.v1 as tf
 import config
 from model import input_fn, model_fn
 import argparse
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, mean_squared_error
 
 tf.disable_v2_behavior()
 
@@ -21,27 +21,43 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-def str2list(v):
+def str2intlist(v):
     return [int(i) for i in v.split(',')]
+
+def str2floatlist(v):
+    return [float(i) for i in v.split(',')]
+
+def str2strlist(v):
+    return [str(i) for i in v.split(',')]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run config.")
     parser.add_argument('--epoch', type=int, default=100,
                         help='Number of epochs.')
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=2000,
                         help='Batch size.')
-    parser.add_argument('--uniq_feature_cnt', type=str2list, default=[238635,98,14,3,8,4,4,3,5,467298,6929,263942,106399,5888,104830,51878,37148,4],
+    parser.add_argument('--expert_num', type=int, default=3,
+                        help='count of experts.')
+    parser.add_argument('--task_num', type=int, default=2,
+                        help='count of tasks.')
+    parser.add_argument('--task_loss', type=str2strlist, default=['xent', 'xent'],
+                        help='tasks\' loss. xent or mse')
+    parser.add_argument('--uniq_feature_cnt', type=str2intlist, default=[238635,98,14,3,8,4,4,3,5,467298,6929,263942,106399,5888,104830,51878,37148,4],
                         help='feature cnt.')
+    parser.add_argument('--expert_layers', type=str2intlist, default=[128],
+                        help='expert layers.')
+    parser.add_argument('--task_layers', type=str2intlist, default=[128,80],
+                        help='task layers.')
     parser.add_argument('--embedding_dim', type=int, default=5,
                         help='Number of embedding dim.')
     parser.add_argument('--lamda', type=float, default=1e-6,
                         help='Regularizer weight.')
-    parser.add_argument('--keep_prob', type=float, default=1.0,
+    parser.add_argument('--keep_prob', type=str2floatlist, default=[0.9,0.7,0.7],
                         help='Keep probability. 1: no dropout.')
     parser.add_argument('--lr', type=float, default=1e-3,
                         help='Learning rate.')
-    parser.add_argument('--optimizer', nargs='?', default='Adam',
-                        help='Specify an optimizer type (adam, adagrad, gd, moment).')
+    parser.add_argument('--optimizer', type=str, default='Adam',
+                        help='Specify an optimizer type (Adam, Adagrad, Sgd, Momentum).')
     parser.add_argument('--early_stop', type=int, default=1,
                         help='Whether to perform early stop')
     parser.add_argument('--co_attention', type=str2bool, default=True,
@@ -111,7 +127,7 @@ def main(_):
     if is_online_training:
       if args.early_stop <= 0: #disable early stop
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)
-        MTL.train(input_fn=lambda: input_fn(train_file_list, batch_size=args.batch_size, num_epochs=args.epoch, perform_shuffle=True))
+        MTL.train(input_fn=lambda: input_fn(train_file_list, batch_size=args.batch_size, num_epochs=args.epoch, perform_shuffle=True, task_num=args.task_num))
       else:
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)
         # steps = None
@@ -119,38 +135,41 @@ def main(_):
         hook_list = [tf.train.ProfilerHook(save_steps=max(steps_per_epoch//10, log_steps), output_dir=out_model_dir, show_memory=True, show_dataflow=True),
                      tf.estimator.CheckpointSaverHook(save_steps=steps_per_epoch, checkpoint_dir=out_model_dir),
                      tf.estimator.experimental.stop_if_no_increase_hook(estimator=MTL, 
-                        metric_name='auc', max_steps_without_increase=steps_per_epoch * args.early_stop,
+                        metric_name='metric_sum', max_steps_without_increase=steps_per_epoch * args.early_stop,
                         min_steps=steps_per_epoch, run_every_secs=None, run_every_steps=steps_per_epoch)
                      ]
         print(hook_list)
-        train_spec = tf.estimator.TrainSpec(input_fn=lambda: input_fn(train_file_list, batch_size=args.batch_size, num_epochs=args.epoch, perform_shuffle=True), max_steps=max_steps, hooks=hook_list)
-        eval_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(val_file_list, batch_size=args.batch_size, num_epochs=1), steps=None, start_delay_secs=120, throttle_secs=180)
+        train_spec = tf.estimator.TrainSpec(input_fn=lambda: input_fn(train_file_list, batch_size=args.batch_size, num_epochs=args.epoch, perform_shuffle=True, task_num=args.task_num), max_steps=max_steps, hooks=hook_list)
+        eval_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(val_file_list, batch_size=args.batch_size, num_epochs=1, task_num=args.task_num), steps=None, start_delay_secs=120, throttle_secs=180)
         tf.estimator.train_and_evaluate(MTL, train_spec, eval_spec)          
     elif is_eval:
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)
-        MTL.evaluate(input_fn=lambda: input_fn(test_file_list, batch_size=args.batch_size, num_epochs=1))
+        MTL.evaluate(input_fn=lambda: input_fn(test_file_list, batch_size=args.batch_size, num_epochs=1, task_num=args.task_num))
     elif is_pred:
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)
-        task1_p = []
-        task2_p = []
-        task1_l = []
-        task2_l = []
+        tasks_p = []
+        tasks_l = []
+        for i in range(args.task_num):
+            tasks_p.append([])
+            tasks_l.append([])
         idx = 0
         with open(args.pred_file, 'w+') as f:
-          for prob in MTL.predict(input_fn=lambda: input_fn(test_file_list, batch_size=args.batch_size, num_epochs=1)):
-            task1_p.extend(prob['task1'])
-            task2_p.extend(prob['task2'])
-            task1_l.extend(prob['task1_l'])
-            task2_l.extend(prob['task2_l'])
+          for prob in MTL.predict(input_fn=lambda: input_fn(test_file_list, batch_size=args.batch_size, num_epochs=1, task_num=args.task_num)):
+            for i in range(args.task_num):
+                tasks_p[i].extend(prob['task%d'%i])
+                tasks_l[i].extend(prob['task%d_l'%i])
             if idx % log_steps == 0:
-                f.write('%f,%f,%f,%f\n' %(prob['task1'][0], prob['task1_l'][0], prob['task2'][0], prob['task2_l'][0]))
-                #print(prob['task1'], prob['task1_l'], prob['task2'], prob['task2_l'])
+                for i in range(args.task_num):
+                    f.write('%f,%f;' %(prob['task%d'%i][0], prob['task%d_l'%i][0]))
+                f.write('\n')
             idx = idx + 1
-          task1_auc = roc_auc_score(y_true=task1_l, y_score=task1_p)
-          task2_auc = roc_auc_score(y_true=task2_l, y_score=task2_p)
-          f.write('task1_auc:%f, task2_auc:%f\n' % (task1_auc, task2_auc))
-          print('task1_auc:', task1_auc)
-          print('task2_auc:', task2_auc)
+          for i in range(args.task_num):
+              if args.task_loss[i] == 'xent':
+                  metric = roc_auc_score(y_true=tasks_l[i], y_score=tasks_p[i])
+                  f.write('task%d_auc:%f,' %(i, metric))
+              else:
+                  metric = mean_squared_error(y_true=tasks_l[i], y_pred=tasks_p[i])
+                  f.write('task%d_mse:%f,' %(i, metric))
 
 if __name__ == '__main__':
     tf.logging.set_verbosity(tf.logging.INFO)

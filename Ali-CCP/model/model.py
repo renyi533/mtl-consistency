@@ -66,11 +66,94 @@ def task_consistency(task_logits_inputs):
         task_outputs.append(task_out)
     return task_outputs
 
+def aitm(feature_embedding, args):
+    l2_reg = tf.keras.regularizers.l2(args.lamda)
+    all_weights = {}
+    # attention
+    all_weights['attention_w1'] = tf.get_variable(
+        initializer=tf.random_normal(
+            shape=[32, 32],
+            mean=0.0,
+            stddev=0.01),
+        regularizer=l2_reg, name='attention_w1')  # k * k
+    all_weights['attention_w2'] = tf.get_variable(
+        initializer=tf.random_normal(
+            shape=[32, 32],
+            mean=0.0,
+            stddev=0.01),
+        regularizer=l2_reg, name='attention_w2')  # k * k
+    all_weights['attention_w3'] = tf.get_variable(
+        initializer=tf.random_normal(
+            shape=[32, 32],
+            mean=0.0,
+            stddev=0.01),
+        regularizer=l2_reg, name='attention_w3')  # k * k   
+    
+    def _attention( input1, input2):
+        '''
+        The attention module.
+        :param input1: None, K
+        :param input2: None, K
+        :return: None, K
+        '''
+        # (N,L,K)
+        inputs = tf.concat([input1[:, None, :], input2[:, None, :]], axis=1)
+        # (N,L,K)*(K,K)->(N,L,K), L=2, K=32 in this.
+        Q = tf.tensordot(inputs, all_weights['attention_w1'], axes=1)
+        K = tf.tensordot(inputs, all_weights['attention_w2'], axes=1)
+        V = tf.tensordot(inputs, all_weights['attention_w3'], axes=1)
+        # (N,L)
+        a = tf.reduce_sum(tf.multiply(Q, K), axis=-1) / \
+            tf.sqrt(tf.cast(inputs.shape[-1], tf.float32))
+        a = tf.nn.softmax(a, axis=1)
+        # (N,L,K)
+        outputs = tf.multiply(a[:, :, None], V)
+        return tf.reduce_sum(outputs, axis=1)  # (N, K)
+
+    tower_click = tf.keras.layers.Dense(
+        128, activation='relu')(feature_embedding)
+    tower_click = tf.keras.layers.Dropout(
+        1 - 0.9)(tower_click)
+    tower_click = tf.keras.layers.Dense(
+        64, activation='relu')(tower_click)
+    tower_click = tf.keras.layers.Dropout(
+        1 - 0.7)(tower_click)
+    tower_click = tf.keras.layers.Dense(
+        32, activation='relu')(tower_click)
+    tower_click = tf.keras.layers.Dropout(
+        1 - 0.7)(tower_click)
+    info = tf.keras.layers.Dense(
+        32, activation='relu')(
+        tower_click)
+    info = tf.keras.layers.Dropout(
+        1 - 0.7)(info)
+
+    tower_purchase = tf.keras.layers.Dense(
+        128, activation='relu')(feature_embedding)
+    tower_purchase = tf.keras.layers.Dropout(
+        1 - 0.9)(tower_purchase)
+    tower_purchase = tf.keras.layers.Dense(
+        64, activation='relu')(tower_purchase)
+    tower_purchase = tf.keras.layers.Dropout(
+        1 - 0.7)(tower_purchase)
+    tower_purchase = tf.keras.layers.Dense(
+        32, activation='relu')(tower_purchase)
+    tower_purchase = tf.keras.layers.Dropout(
+        1 - 0.7)(tower_purchase)
+    ait = _attention(tower_purchase, info)
+
+    click = tf.keras.layers.Dense(1)(tower_click)
+    purchase = tf.keras.layers.Dense(1)(ait)
+    task_outputs = [click, purchase]
+    return task_outputs
+     
 def model(dnn_inputs, args, mode=None):
     if args.model == 'mmoe':
         task_tower_inputs = mmoe(dnn_inputs, args)
     elif args.model == 'ple':
         task_tower_inputs = ple(dnn_inputs, args)
+    elif args.model == 'aitm':
+        return aitm(dnn_inputs, args)
     else:
         assert False
             
@@ -154,12 +237,15 @@ def model_fn(features, labels, mode=None, params=None):
     slot_cnt = len(uniq_feature_cnt)
     dnn_inputs = []
     feat_dnn = tf.split(feat_dnn, num_or_size_splits=slot_cnt, axis=-1)
+    l2_reg = tf.keras.regularizers.l2(args.lamda)
     with tf.variable_scope("model"):
         for i in range(slot_cnt):
             vocab_size = uniq_feature_cnt[i]
             DEEP_V = tf.get_variable(name='emb_%d' % i, 
                                      shape=[vocab_size, args.embedding_dim], 
-                                     initializer=tf.glorot_normal_initializer())
+                                     regularizer=l2_reg,
+                                     initializer=tf.random_normal_initializer(mean=0.0, stddev=0.01))
+                                     #initializer=tf.glorot_normal_initializer())
             feature_emb = tf.nn.embedding_lookup(DEEP_V, feat_dnn[i])
             dnn_inputs.append(feature_emb)
 
@@ -182,13 +268,20 @@ def model_fn(features, labels, mode=None, params=None):
     loss = tf.losses.log_loss(labels, pred_task1) + tf.losses.log_loss(labels2, pred_task2) 
     #loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=y_d_task1, labels=labels)) \
     #        +  tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=y_d_task2, labels=labels2))
+    reg_variables = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
+    if args.lamda > 0:
+        reg_loss = tf.add_n(reg_variables)
+    else:
+        reg_loss = 0
+    loss += reg_loss
    
     # Provide an estimator spec for `ModeKeys.EVAL`
     ROC_bucket = 20000
-    eval_metric_ops = {
-                       "auc1": tf.metrics.auc(labels, pred_task1, num_thresholds=ROC_bucket, curve='ROC'),
-                       "auc2": tf.metrics.auc(labels2,pred_task2, num_thresholds=ROC_bucket, curve='ROC') 
-                       }
+    auc1 = tf.metrics.auc(labels, pred_task1, num_thresholds=ROC_bucket, curve='ROC')
+    auc2 = tf.metrics.auc(labels2,pred_task2, num_thresholds=ROC_bucket, curve='ROC')
+    auc = (auc1[0] + auc2[0]) / 2
+    eval_metric_ops = { "auc1": auc1, "auc2": auc2, "auc": auc }
     if mode == tf.estimator.ModeKeys.EVAL:
         return tf.estimator.EstimatorSpec(
                 mode=mode,
@@ -220,6 +313,7 @@ def model_fn(features, labels, mode=None, params=None):
 
 if __name__ == '__main__':
     train_file_list = sys.argv[1]
+
 
 
 

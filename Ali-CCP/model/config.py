@@ -16,7 +16,7 @@ task_experts_ple = [
     (0, 1),
     (1, 2)
 ]
-task_layers = [80]
+task_layers = [128,80]
 
 #v1
 dnn_layers = [200, 80]

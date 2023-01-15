@@ -34,13 +34,15 @@ def parse_args():
                         help='feature cnt.')
     parser.add_argument('--embedding_dim', type=int, default=5,
                         help='Number of embedding dim.')
+    parser.add_argument('--lamda', type=float, default=1e-6,
+                        help='Regularizer weight.')
     parser.add_argument('--keep_prob', type=float, default=1.0,
                         help='Keep probability. 1: no dropout.')
     parser.add_argument('--lr', type=float, default=1e-3,
                         help='Learning rate.')
     parser.add_argument('--optimizer', nargs='?', default='Adam',
                         help='Specify an optimizer type (adam, adagrad, gd, moment).')
-    parser.add_argument('--early_stop', type=str2bool, default=True,
+    parser.add_argument('--early_stop', type=int, default=1,
                         help='Whether to perform early stop')
     parser.add_argument('--co_attention', type=str2bool, default=True,
                         help='Whether to use co-attention')
@@ -107,17 +109,17 @@ def main(_):
     c = tf.estimator.RunConfig().replace(session_config=tf.ConfigProto(device_count=gpu_info), log_step_count_steps=log_steps, save_summary_steps=log_steps, keep_checkpoint_max=5)
 
     if is_online_training:
-      if not args.early_stop:
+      if args.early_stop <= 0: #disable early stop
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)
         MTL.train(input_fn=lambda: input_fn(train_file_list, batch_size=args.batch_size, num_epochs=args.epoch, perform_shuffle=True))
       else:
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)
         # steps = None
         max_steps = steps_per_epoch * args.epoch
-        hook_list = [tf.train.ProfilerHook(save_steps=log_steps*10, output_dir=out_model_dir, show_memory=True, show_dataflow=True),
+        hook_list = [tf.train.ProfilerHook(save_steps=max(steps_per_epoch//10, log_steps), output_dir=out_model_dir, show_memory=True, show_dataflow=True),
                      tf.estimator.CheckpointSaverHook(save_steps=steps_per_epoch, checkpoint_dir=out_model_dir),
                      tf.estimator.experimental.stop_if_no_increase_hook(estimator=MTL, 
-                        metric_name='auc1', max_steps_without_increase=steps_per_epoch,
+                        metric_name='auc', max_steps_without_increase=steps_per_epoch * args.early_stop,
                         min_steps=steps_per_epoch, run_every_secs=None, run_every_steps=steps_per_epoch)
                      ]
         print(hook_list)

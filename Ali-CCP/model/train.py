@@ -8,6 +8,7 @@ import config
 from model import input_fn, model_fn
 import argparse
 from sklearn.metrics import roc_auc_score, mean_squared_error
+from best_checkpoint_copier import BestCheckpointCopier
 
 tf.disable_v2_behavior()
 
@@ -140,7 +141,14 @@ def main(_):
                      ]
         print(hook_list)
         train_spec = tf.estimator.TrainSpec(input_fn=lambda: input_fn(train_file_list, batch_size=args.batch_size, num_epochs=args.epoch, perform_shuffle=True, task_num=args.task_num), max_steps=max_steps, hooks=hook_list)
-        eval_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(val_file_list, batch_size=args.batch_size, num_epochs=1, task_num=args.task_num), steps=None, start_delay_secs=120, throttle_secs=180)
+        best_copier = BestCheckpointCopier(
+            name='best', # directory within model directory to copy checkpoints to
+            checkpoints_to_keep=2, # number of checkpoints to keep
+            score_metric='metric_sum', # metric to use to determine "best"
+            compare_fn=lambda x,y: x.score > y.score, # comparison function used to determine "best" checkpoint (x is the current checkpoint; y is the previously copied checkpoint with the highest/worst score)
+            sort_key_fn=lambda x: x.score,
+            sort_reverse=True) # sort order when discarding excess checkpoints
+        eval_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(val_file_list, batch_size=args.batch_size, num_epochs=1, task_num=args.task_num), steps=None, exporters=best_copier, start_delay_secs=120, throttle_secs=180)
         tf.estimator.train_and_evaluate(MTL, train_spec, eval_spec)          
     elif is_eval:
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)
@@ -174,4 +182,5 @@ def main(_):
 if __name__ == '__main__':
     tf.logging.set_verbosity(tf.logging.INFO)
     tf.app.run()
+
 

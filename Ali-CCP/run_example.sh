@@ -27,6 +27,18 @@ do
     python ./model/train.py --model_dir ./ckpt/ali-ccp/${model}_attn_$i/best --mode pred --model ${model} --co_attention True --global_experience False --epoch 1 --pred_file logs/${model}_attn_result_$i.txt > logs/${model}_attn_test_$i.log 2>&1 &
     python ./model/train.py --model_dir ./ckpt/ali-ccp/${model}_global_$i/best --mode pred --model ${model} --co_attention False --global_experience True --epoch 1 --pred_file logs/${model}_global_result_$i.txt > logs/${model}_global_test_$i.log 2>&1 & 
     wait_function
+
+    python ./model/train.py --test_data_dir ./data/ali-ccp/train  --model_dir ./ckpt/ali-ccp/${model}_dml_$i/best --mode pred --model ${model} --co_attention True --global_experience True --epoch 1 --pred_file logs/${model}_dml_result_train_$i.txt > logs/${model}_dml_test_$i.log 2>&1 &
+    python ./model/train.py --test_data_dir ./data/ali-ccp/train  --model_dir ./ckpt/ali-ccp/${model}_$i/best --mode pred --model ${model} --co_attention False --global_experience False --epoch 1 --pred_file logs/${model}_result_train_$i.txt > logs/${model}_test_$i.log 2>&1 &
+    python ./model/train.py --test_data_dir ./data/ali-ccp/train --model_dir ./ckpt/ali-ccp/${model}_attn_$i/best --mode pred --model ${model} --co_attention True --global_experience False --epoch 1 --pred_file logs/${model}_attn_result_train_$i.txt > logs/${model}_attn_test_$i.log 2>&1 &
+    python ./model/train.py --test_data_dir ./data/ali-ccp/train  --model_dir ./ckpt/ali-ccp/${model}_global_$i/best --mode pred --model ${model} --co_attention False --global_experience True --epoch 1 --pred_file logs/${model}_global_result_train_$i.txt > logs/${model}_global_test_$i.log 2>&1 &
+    wait_function
+
+    python ./model/train.py --test_data_dir ./data/ali-ccp/val  --model_dir ./ckpt/ali-ccp/${model}_dml_$i/best --mode pred --model ${model} --co_attention True --global_experience True --epoch 1 --pred_file logs/${model}_dml_result_val_$i.txt > logs/${model}_dml_test_$i.log 2>&1 &
+    python ./model/train.py --test_data_dir ./data/ali-ccp/val --model_dir ./ckpt/ali-ccp/${model}_$i/best --mode pred --model ${model} --co_attention False --global_experience False --epoch 1 --pred_file logs/${model}_result_val_$i.txt > logs/${model}_test_$i.log 2>&1 &
+    python ./model/train.py --test_data_dir ./data/ali-ccp/val --model_dir ./ckpt/ali-ccp/${model}_attn_$i/best --mode pred --model ${model} --co_attention True --global_experience False --epoch 1 --pred_file logs/${model}_attn_result_val_$i.txt > logs/${model}_attn_test_$i.log 2>&1 &
+    python ./model/train.py --test_data_dir ./data/ali-ccp/val --model_dir ./ckpt/ali-ccp/${model}_global_$i/best --mode pred --model ${model} --co_attention False --global_experience True --epoch 1 --pred_file logs/${model}_global_result_val_$i.txt > logs/${model}_global_test_$i.log 2>&1 &
+    wait_function
   done  
     
     python ./model/train.py --model_dir ./ckpt/ali-ccp/aitm_$i --mode training --early_stop 3 --keep_prob 0.9,0.7,0.7  --model aitm --epoch 50 > logs/aitm_train_$i.log 2>&1 &

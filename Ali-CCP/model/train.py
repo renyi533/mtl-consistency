@@ -103,6 +103,11 @@ def main(_):
     args = parse_args()
     out_model_dir = args.model_dir 
 
+    physical_devices = tf.config.list_physical_devices('GPU')
+    print('Available gpu devices', physical_devices)
+    for device in physical_devices:
+        tf.config.experimental.set_memory_growth(device, True)
+
     is_online_training, is_eval, is_pred = False, False, False
     if args.mode == 'training':
         is_online_training = True

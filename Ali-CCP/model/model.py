@@ -53,7 +53,9 @@ def task_coattention(original_tower_inputs, args, mode):
     weights = tf.nn.softmax(weights)
     task_tower_inputs = tf.matmul(weights, task_tower_inputs_V)  
     task_tower_inputs = tf.reshape(task_tower_inputs, [-1, args.task_num * args.expert_layers[-1]])
-
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        task_tower_inputs = tf.nn.dropout(task_tower_inputs, keep_prob=args.keep_prob[2])
+        
     outputs=[]
     for i in range(args.task_num):
         output = task_tower_inputs[:, i * args.expert_layers[-1] : args.expert_layers[-1]*(i + 1)] + original_tower_inputs[i]
@@ -237,10 +239,19 @@ def ple(dnn_inputs, args, mode):
         task_experts = tf.stack(task_experts, axis=1)
         task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
         cgc_outputs.append(task_input)
- 
+
+    all_experts = []
+    for i in range(args.expert_num):
+        expert_input = cgc_outputs[i]
+        for j, node_num in enumerate(args.expert_layers):
+            expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
+        all_experts.append(expert_input)
+         
     for i in range(args.task_num):
-        task_experts = [cgc_outputs[i]]
-        task_experts.extend([cgc_outputs[k] for k in range(args.task_num, args.expert_num)])
+        task_experts = [all_experts[i]]
+        task_experts.extend([all_experts[k] for k in range(args.task_num, args.expert_num)])
         gate = tf.layers.dense(cgc_outputs[i], len(task_experts), activation=tf.nn.softmax)
         #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
         gate = tf.expand_dims(gate, axis=1)
@@ -320,10 +331,10 @@ def model_fn(features, labels, mode=None, params=None):
     for i in range(args.task_num):
         if args.task_loss[i] == 'xent':
             eval_metric_ops['auc_%d'%i] = tf.metrics.auc(task_labels[i], task_preds[i], num_thresholds=ROC_bucket, curve='ROC')
-            metric_sum = metric_sum + eval_metric_ops['auc_%d'%i][0]
+            metric_sum = metric_sum + eval_metric_ops['auc_%d'%i][0] * args.task_weight[i]
         else:
             eval_metric_ops['mse_%d'%i] = tf.metrics.mean_squared_error(task_labels[i], task_preds[i])
-            metric_sum = metric_sum + eval_metric_ops['mse_%d'%i][0]
+            metric_sum = metric_sum + eval_metric_ops['mse_%d'%i][0] * args.task_weight[i]
     eval_metric_ops['metric_sum'] = (metric_sum, tf.no_op())
     if mode == tf.estimator.ModeKeys.EVAL:
         return tf.estimator.EstimatorSpec(
@@ -354,6 +365,7 @@ def model_fn(features, labels, mode=None, params=None):
 
 if __name__ == '__main__':
     train_file_list = sys.argv[1]
+
 
 
 

@@ -43,6 +43,8 @@ def parse_args():
                         help='count of tasks.')
     parser.add_argument('--task_loss', type=str2strlist, default=['xent', 'xent'],
                         help='tasks\' loss. xent or mse')
+    parser.add_argument('--task_weight', type=str2floatlist, default=[1.0, 1.0],
+                        help='task weights to compute metric_sum for early stop, for mse should assign negative w')
     parser.add_argument('--uniq_feature_cnt', type=str2intlist, default=[238635,98,14,3,8,4,4,3,5,467298,6929,263942,106399,5888,104830,51878,37148,4],
                         help='feature cnt.')
     parser.add_argument('--expert_layers', type=str2intlist, default=[128],
@@ -182,5 +184,6 @@ def main(_):
 if __name__ == '__main__':
     tf.logging.set_verbosity(tf.logging.INFO)
     tf.app.run()
+
 
 

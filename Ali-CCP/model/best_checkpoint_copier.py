@@ -64,7 +64,7 @@ class BestCheckpointCopier(tf.estimator.Exporter):
       self._log('removing old checkpoint {} with score {}'.format(checkpoint.file, checkpoint.score))
 
       old_checkpoint_path = os.path.join(destination_dir, checkpoint.file)
-      for file in glob.glob(r'{}*'.format(old_checkpoint_path)):
+      for file in glob.glob(r'{}.*'.format(old_checkpoint_path)):
         self._log('removing old checkpoint file {}'.format(file))
         os.remove(file)
 

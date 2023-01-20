@@ -79,8 +79,12 @@ def parse_args():
                         help='Whether to perform early stop')
     parser.add_argument('--co_attention', type=str2bool, default=True,
                         help='Whether to use co-attention')
+    parser.add_argument('--co_attention_stop_grad', type=str2bool, default=True,
+                        help='Whether to stop gradient with co-attention')
     parser.add_argument('--global_experience', type=str2bool, default=True,
                         help='Whether to use global experience')
+    parser.add_argument('--global_experience_attn_layer', type=int, default=1,
+                        help='MLP layer cnt for global experience attention.')
     parser.add_argument('--model', type=str, default='mmoe',
                         help='base model to test')
     parser.add_argument('--mode', type=str, default='training',
@@ -115,6 +119,7 @@ def get_line_cnt(file_list):
 
 def main(_):    
     args = parse_args()
+    print(args)
     out_model_dir = args.model_dir 
 
     physical_devices = tf.config.list_physical_devices('GPU')

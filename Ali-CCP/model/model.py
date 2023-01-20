@@ -44,7 +44,8 @@ def task_coattention(original_tower_inputs, args, mode):
     task_tower_inputs = tf.reshape(task_tower_inputs, [-1, args.task_num, args.expert_layers[-1]])
 
     task_tower_inputs_Q = tf.layers.dense(task_tower_inputs, args.expert_layers[-1], activation=tf.nn.relu)
-    task_tower_inputs = tf.stop_gradient(task_tower_inputs)
+    if args.co_attention_stop_grad:
+        task_tower_inputs = tf.stop_gradient(task_tower_inputs)
     task_tower_inputs_K = tf.layers.dense(task_tower_inputs, args.expert_layers[-1], activation=tf.nn.relu)
     task_tower_inputs_V = tf.layers.dense(task_tower_inputs, args.expert_layers[-1], activation=tf.nn.relu)
 
@@ -65,15 +66,21 @@ def task_coattention(original_tower_inputs, args, mode):
 
 def task_consistency(task_logits_inputs, args, mode):
     task_outputs = []
-    global_experience = tf.concat(task_logits_inputs, axis=-1)
+    global_experience = tf.stop_gradient(tf.concat(task_logits_inputs, axis=-1))
     for i in range(args.task_num):
         task_input = task_logits_inputs[i]
-        info_from_global = tf.layers.dense(tf.stop_gradient(global_experience), args.task_layers[-1], activation=tf.nn.relu)
+        info_from_global = tf.layers.dense(global_experience, args.task_layers[-1], activation=tf.nn.relu)
         if mode == tf.estimator.ModeKeys.TRAIN:
             info_from_global = tf.nn.dropout(info_from_global, keep_prob=args.keep_prob[2])
-
-        experience_weight = tf.layers.dense(tf.concat([task_input, info_from_global], axis=-1), args.task_layers[-1], activation=tf.nn.relu)
-        experience_weight = tf.layers.dense(experience_weight, args.task_layers[-1], activation=tf.nn.sigmoid)
+        
+        layer_input = tf.concat([task_input, info_from_global], axis=-1)
+        for j in range(args.global_experience_attn_layer):
+            if j == args.global_experience_attn_layer - 1:
+                act_func = tf.nn.sigmoid
+            else:
+                act_func = tf.nn.relu
+            layer_input = tf.layers.dense(layer_input, args.task_layers[-1], activation=act_func)
+        experience_weight = layer_input
         task_input = task_input + experience_weight * info_from_global
         task_out = tf.layers.dense(task_input, 1, activation=tf.identity, use_bias=False)
         task_outputs.append(task_out)

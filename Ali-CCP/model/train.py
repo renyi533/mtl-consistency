@@ -55,6 +55,8 @@ def parse_args():
                         help='Number of embedding dim.')
     parser.add_argument('--lamda', type=float, default=1e-6,
                         help='Regularizer weight.')
+    parser.add_argument('--SNR_l0_loss_weight', type=float, default=0.001,
+                        help='Regularizer weight.')
     parser.add_argument('--keep_prob', type=str2floatlist, default=[0.9,0.7,0.7],
                         help='Keep probability. 1: no dropout.')
     parser.add_argument('--lr', type=float, default=1e-3,

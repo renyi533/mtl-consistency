@@ -68,13 +68,13 @@ def task_consistency(task_logits_inputs, args, mode):
     global_experience = tf.concat(task_logits_inputs, axis=-1)
     for i in range(args.task_num):
         task_input = task_logits_inputs[i]
-        global_experience = tf.layers.dense(tf.stop_gradient(global_experience), args.task_layers[-1], activation=tf.nn.relu)
+        info_from_global = tf.layers.dense(tf.stop_gradient(global_experience), args.task_layers[-1], activation=tf.nn.relu)
         if mode == tf.estimator.ModeKeys.TRAIN:
-            global_experience = tf.nn.dropout(global_experience, keep_prob=args.keep_prob[2])
+            info_from_global = tf.nn.dropout(info_from_global, keep_prob=args.keep_prob[2])
 
-        experience_weight = tf.layers.dense(tf.concat([task_input, global_experience], axis=-1), args.task_layers[-1], activation=tf.nn.relu)
+        experience_weight = tf.layers.dense(tf.concat([task_input, info_from_global], axis=-1), args.task_layers[-1], activation=tf.nn.relu)
         experience_weight = tf.layers.dense(experience_weight, args.task_layers[-1], activation=tf.nn.sigmoid)
-        task_input = task_input + experience_weight * global_experience
+        task_input = task_input + experience_weight * info_from_global
         task_out = tf.layers.dense(task_input, 1, activation=tf.identity, use_bias=False)
         task_outputs.append(task_out)
     return task_outputs
@@ -158,10 +158,13 @@ def aitm(feature_embedding, args):
     return task_outputs
      
 def model(dnn_inputs, args, mode):
+    snr_l0_loss = 0.0
     if args.model == 'mmoe':
         task_tower_inputs = mmoe(dnn_inputs, args, mode)
     elif args.model == 'ple':
         task_tower_inputs = ple(dnn_inputs, args, mode)
+    elif args.model == 'snr':
+        task_tower_inputs, snr_l0_loss = snr(dnn_inputs, args, mode)
     elif args.model == 'aitm':
         return aitm(dnn_inputs, args)
     else:
@@ -187,7 +190,7 @@ def model(dnn_inputs, args, mode):
         for i in range(args.task_num):
             task_outputs[i] += task_outputs_consistency[i]
         
-    return task_outputs
+    return task_outputs, snr_l0_loss
 
 def mmoe(dnn_inputs, args, mode):
     all_experts = []
@@ -260,6 +263,61 @@ def ple(dnn_inputs, args, mode):
         task_tower_inputs.append(task_input)
     return task_tower_inputs
     
+def snr(dnn_inputs, args, mode):
+    def l0_norm(target, temperature, lower, higher):
+        """Returns the L0 norm."""
+        offsets = temperature * tf.math.log(-lower / higher)
+        return tf.reduce_mean(tf.reduce_sum(target - offsets, axis=-1, keepdims = True))
+        #return tf.reduce_mean(target - offsets)
+
+    def hard_sigmoid(target, lower, higher):
+        """Stretches and clips sigmoid samples between 0 and 1."""
+        samples = tf.nn.sigmoid(target) * (higher - lower) + lower
+        return tf.clip_by_value(samples, 0., 1.)
+
+    def sample(target, temperature, lower, higher, mode, eps=1e-20):
+        U = tf.random.uniform(tf.shape(target, out_type=tf.int32), minval=0, maxval=1, dtype=tf.float32)
+        sample = (tf.math.log(U + eps) - tf.math.log((1 - U) + eps) + target)/temperature
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            sample = sample
+        else:
+            sample = target 
+        return hard_sigmoid(sample, lower, higher)
+
+    def _SNR(input_layer, snr_layers):
+        snr_l0_loss = 0
+        for i, pair in enumerate(snr_layers) :
+            node_num = pair[0]
+            net_num = pair[1]
+            next_layer = []
+            if i != 0:
+                for j in range(net_num):
+                    log_alpha = tf.compat.v1.get_variable('log_alpha_{0}_{1}'.format(i, j), shape=(1, route_num), dtype=tf.float32)    
+                    snr_l0_loss += l0_norm(log_alpha, config.SNR_temperature, config.SNR_lower, config.SNR_higher)
+                    route = sample(log_alpha, config.SNR_temperature, config.SNR_lower, config.SNR_higher, mode) 
+                    route = tf.expand_dims(route, axis=1)
+                    net_input = tf.stack(input_layer, axis=1)
+                    net_input = tf.squeeze(tf.matmul(route, net_input), axis=1)
+                    net = tf.layers.dense(net_input, node_num, activation=tf.nn.relu)
+                    next_layer.append(net) 
+                input_layer = next_layer
+                route_num = net_num
+            else:
+                route_num = net_num
+        return next_layer, snr_l0_loss
+
+    all_experts = []
+    for i in range(args.expert_num):
+        expert_input = dnn_inputs
+        for j, node_num in enumerate(args.expert_layers):
+            expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
+        all_experts.append(expert_input)
+
+    task_tower_inputs, snr_l0_loss = _SNR(all_experts, config.SNR_layers) 
+
+    return task_tower_inputs, snr_l0_loss
 
 def model_fn(features, labels, mode=None, params=None):
  
@@ -288,7 +346,7 @@ def model_fn(features, labels, mode=None, params=None):
         dnn_inputs = tf.concat(dnn_inputs, axis=-1) 
         dnn_inputs = tf.squeeze(dnn_inputs, axis=-2)
         
-        task_outputs = model(dnn_inputs, args, mode)
+        task_outputs, snr_l0_loss = model(dnn_inputs, args, mode)
         task_preds = []
         for i in range(args.task_num):
             if args.task_loss[i] == 'xent':
@@ -323,7 +381,7 @@ def model_fn(features, labels, mode=None, params=None):
     else:
         reg_loss = 0
     loss += reg_loss
-   
+    loss += args.SNR_l0_loss_weight * snr_l0_loss
     # Provide an estimator spec for `ModeKeys.EVAL`
     ROC_bucket = 20000
     eval_metric_ops = {}

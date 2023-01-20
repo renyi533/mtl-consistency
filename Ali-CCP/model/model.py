@@ -220,10 +220,10 @@ def ple(dnn_inputs, args, mode):
         for i in range(args.expert_num):
             if i < args.task_num:
                 task_experts = [all_experts[i]]
-                task_experts.extend([all_experts[k] for k in range(args.task_num, args.expert_num)])
+                task_experts.extend([all_experts[j] for j in range(args.task_num, args.expert_num)])
             else:
                 if k < args.ple_layer_cnt - 1:
-                    task_experts = [all_experts[k] for k in range(args.expert_num)]
+                    task_experts = [all_experts[j] for j in range(args.expert_num)]
                 else: # do not need update shared experts at last layer
                     break
                 

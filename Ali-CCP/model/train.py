@@ -53,11 +53,23 @@ def parse_args():
                         help='task layers.')
     parser.add_argument('--embedding_dim', type=int, default=5,
                         help='Number of embedding dim.')
+    parser.add_argument('--ple_layer_cnt', type=int, default=2,
+                        help='Number of ple layers.')
+    parser.add_argument('--snr_layer_cnt', type=int, default=2,
+                        help='Number of snr layers.')
     parser.add_argument('--lamda', type=float, default=1e-6,
                         help='Regularizer weight.')
-    parser.add_argument('--SNR_l0_loss_weight', type=float, default=0.001,
-                        help='Regularizer weight.')
-    parser.add_argument('--keep_prob', type=str2floatlist, default=[0.9,0.7,0.7],
+    parser.add_argument('--snr_l0_loss_weight', type=float, default=0.0001,
+                        help='snr sparsity Regularizer weight.')
+    parser.add_argument('--snr_lower', type=float, default=-1.0,
+                        help='snr lower.')
+    parser.add_argument('--snr_higher', type=float, default=3.0,
+                        help='snr higher.')
+    parser.add_argument('--snr_temperature', type=float, default=1.0,
+                        help='snr temperature.')
+    parser.add_argument('--snr_mode', type=str, default='trans',
+                        help='snr mode: trans or aver.')
+    parser.add_argument('--keep_prob', type=str2floatlist, default=[1.0,1.0,1.0],
                         help='Keep probability. 1: no dropout.')
     parser.add_argument('--lr', type=float, default=1e-3,
                         help='Learning rate.')

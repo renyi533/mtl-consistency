@@ -14,7 +14,7 @@ wait_function () {
 }
 while [ $i -lt $iter ]
 do
-  for model in mmoe ple
+  for model in mmoe ple snr
   do
     python ./model/train.py --model_dir ./ckpt/ali-ccp/${model}_dml_$i --mode training --early_stop 3 --keep_prob 0.9,0.7,0.7  --model ${model} --co_attention True --global_experience True --epoch 50 > logs/${model}_dml_train_$i.log 2>&1 &
     python ./model/train.py --model_dir ./ckpt/ali-ccp/${model}_$i --mode training --early_stop 3 --keep_prob 0.9,0.7,0.7  --model ${model} --co_attention False --global_experience False --epoch 50 > logs/${model}_train_$i.log 2>&1 &

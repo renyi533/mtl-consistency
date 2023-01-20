@@ -193,14 +193,7 @@ def model(dnn_inputs, args, mode):
     return task_outputs, snr_l0_loss
 
 def mmoe(dnn_inputs, args, mode):
-    all_experts = []
-    for i in range(args.expert_num):
-        expert_input = dnn_inputs
-        for j, node_num in enumerate(args.expert_layers):
-            expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
-            if mode == tf.estimator.ModeKeys.TRAIN:
-                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
-        all_experts.append(expert_input)
+    all_experts = expert_layer([dnn_inputs] * args.expert_num, args, mode)
 
     task_tower_inputs = []
     for i in range(args.task_num):
@@ -218,56 +211,38 @@ def mmoe(dnn_inputs, args, mode):
     return task_tower_inputs
 
 def ple(dnn_inputs, args, mode):
-    all_experts = []
-    for i in range(args.expert_num):
-        expert_input = dnn_inputs
-        for j, node_num in enumerate(args.expert_layers):
-            expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
-            if mode == tf.estimator.ModeKeys.TRAIN:
-                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
-        all_experts.append(expert_input)
-
-    task_tower_inputs = []
-    cgc_outputs = []
-    for i in range(args.expert_num):
-        if i < args.task_num:
-            task_experts = [all_experts[i]]
-            task_experts.extend([all_experts[k] for k in range(args.task_num, args.expert_num)])
-        else:
-            task_experts = [all_experts[k] for k in range(args.expert_num)]
+    layer_inputs = [dnn_inputs] * args.expert_num
+    layer_outputs = [dnn_inputs] * args.expert_num
+    assert args.ple_layer_cnt >= 1
+    for k in range(args.ple_layer_cnt):
+        all_experts = expert_layer(layer_inputs, args, mode)
+        layer_outputs = []
+        for i in range(args.expert_num):
+            if i < args.task_num:
+                task_experts = [all_experts[i]]
+                task_experts.extend([all_experts[k] for k in range(args.task_num, args.expert_num)])
+            else:
+                if k < args.ple_layer_cnt - 1:
+                    task_experts = [all_experts[k] for k in range(args.expert_num)]
+                else: # do not need update shared experts at last layer
+                    break
+                
+            gate = tf.layers.dense(layer_inputs[i], len(task_experts), activation=tf.nn.softmax)
+            #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
+            gate = tf.expand_dims(gate, axis=1)
+            task_experts = tf.stack(task_experts, axis=1)
+            task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
+            layer_outputs.append(task_input)
+        layer_inputs = layer_outputs
             
-        gate = tf.layers.dense(dnn_inputs, len(task_experts), activation=tf.nn.softmax)
-        #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
-        gate = tf.expand_dims(gate, axis=1)
-        task_experts = tf.stack(task_experts, axis=1)
-        task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
-        cgc_outputs.append(task_input)
-
-    all_experts = []
-    for i in range(args.expert_num):
-        expert_input = cgc_outputs[i]
-        for j, node_num in enumerate(args.expert_layers):
-            expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
-            if mode == tf.estimator.ModeKeys.TRAIN:
-                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
-        all_experts.append(expert_input)
-         
-    for i in range(args.task_num):
-        task_experts = [all_experts[i]]
-        task_experts.extend([all_experts[k] for k in range(args.task_num, args.expert_num)])
-        gate = tf.layers.dense(cgc_outputs[i], len(task_experts), activation=tf.nn.softmax)
-        #tf.Print(gate, [gate], message="gate: ", first_n=10, summarize=5)
-        gate = tf.expand_dims(gate, axis=1)
-        task_experts = tf.stack(task_experts, axis=1)
-        task_input = tf.squeeze(tf.matmul(gate, task_experts), axis=1)
-        task_tower_inputs.append(task_input)
-    return task_tower_inputs
+    return layer_outputs[:args.task_num]
     
 def snr(dnn_inputs, args, mode):
     def l0_norm(target, temperature, lower, higher):
         """Returns the L0 norm."""
         offsets = temperature * tf.math.log(-lower / higher)
-        return tf.reduce_mean(tf.reduce_sum(target - offsets, axis=-1, keepdims = True))
+        dense_probs = tf.nn.sigmoid(target - offsets)
+        return tf.reduce_mean(tf.reduce_sum(dense_probs, axis=-1, keepdims = True))
         #return tf.reduce_mean(target - offsets)
 
     def hard_sigmoid(target, lower, higher):
@@ -284,41 +259,52 @@ def snr(dnn_inputs, args, mode):
             sample = target 
         return hard_sigmoid(sample, lower, higher)
 
-    def _SNR(input_layer, snr_layers):
+    def _SNR(dnn_inputs):
         snr_l0_loss = 0
-        for i, pair in enumerate(snr_layers) :
-            node_num = pair[0]
-            net_num = pair[1]
-            next_layer = []
-            if i != 0:
-                for j in range(net_num):
-                    log_alpha = tf.compat.v1.get_variable('log_alpha_{0}_{1}'.format(i, j), shape=(1, route_num), dtype=tf.float32)    
-                    snr_l0_loss += l0_norm(log_alpha, config.SNR_temperature, config.SNR_lower, config.SNR_higher)
-                    route = sample(log_alpha, config.SNR_temperature, config.SNR_lower, config.SNR_higher, mode) 
-                    route = tf.expand_dims(route, axis=1)
-                    net_input = tf.stack(input_layer, axis=1)
-                    net_input = tf.squeeze(tf.matmul(route, net_input), axis=1)
-                    net = tf.layers.dense(net_input, node_num, activation=tf.nn.relu)
-                    next_layer.append(net) 
-                input_layer = next_layer
-                route_num = net_num
+        layer_inputs = [dnn_inputs] * args.expert_num
+        layer_outputs = [dnn_inputs] * args.expert_num
+        assert args.snr_layer_cnt > 1
+        for k in range(args.snr_layer_cnt):
+            all_experts = expert_layer(layer_inputs, args, mode)
+            layer_outputs = []
+            if k == args.snr_layer_cnt - 1:
+                next_expert_num = args.task_num
             else:
-                route_num = net_num
-        return next_layer, snr_l0_loss
+                next_expert_num = args.expert_num
+            for i in range(next_expert_num):
+                log_alpha = tf.get_variable('log_alpha_{0}_{1}'.format(k, i), 
+                                                      shape=(1, args.expert_num), 
+                                                      initializer=tf.constant_initializer(-0.5),
+                                                      dtype=tf.float32)
+                snr_l0_loss += l0_norm(log_alpha, args.snr_temperature, args.snr_lower, args.snr_higher)
+                route = sample(log_alpha, args.snr_temperature, args.snr_lower, args.snr_higher, mode) 
+                route = tf.expand_dims(route, axis=1)
+                if args.snr_mode == 'trans':
+                    all_experts = [tf.layers.dense(e, args.expert_layers[-1], 
+                                                   use_bias=False,
+                                                   activation=tf.identity) for e in all_experts]
+                else:
+                    assert args.snr_mode == 'aver'
+                net_input = tf.stack(all_experts, axis=1)
+                net_input = tf.squeeze(tf.matmul(route, net_input), axis=1)
+                layer_outputs.append(net_input) 
+            layer_inputs = layer_outputs
+        return layer_outputs, snr_l0_loss
 
+    task_tower_inputs, snr_l0_loss = _SNR(dnn_inputs) 
+    return task_tower_inputs, snr_l0_loss
+
+def expert_layer(expert_inputs, args, mode):
     all_experts = []
     for i in range(args.expert_num):
-        expert_input = dnn_inputs
+        expert_input = expert_inputs[i]
         for j, node_num in enumerate(args.expert_layers):
             expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
             if mode == tf.estimator.ModeKeys.TRAIN:
                 expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
-        all_experts.append(expert_input)
-
-    task_tower_inputs, snr_l0_loss = _SNR(all_experts, config.SNR_layers) 
-
-    return task_tower_inputs, snr_l0_loss
-
+        all_experts.append(expert_input)    
+    return all_experts
+        
 def model_fn(features, labels, mode=None, params=None):
  
     args = params['args']
@@ -381,7 +367,7 @@ def model_fn(features, labels, mode=None, params=None):
     else:
         reg_loss = 0
     loss += reg_loss
-    loss += args.SNR_l0_loss_weight * snr_l0_loss
+    loss += args.snr_l0_loss_weight * snr_l0_loss
     # Provide an estimator spec for `ModeKeys.EVAL`
     ROC_bucket = 20000
     eval_metric_ops = {}

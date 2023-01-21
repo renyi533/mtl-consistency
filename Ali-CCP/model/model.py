@@ -173,7 +173,7 @@ def model(dnn_inputs, args, mode):
     elif args.model == 'snr':
         task_tower_inputs, snr_l0_loss = snr(dnn_inputs, args, mode)
     elif args.model == 'aitm':
-        return aitm(dnn_inputs, args)
+        return aitm(dnn_inputs, args), snr_l0_loss
     else:
         assert False
             

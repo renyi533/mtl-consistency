@@ -174,7 +174,7 @@ def main(_):
             compare_fn=lambda x,y: x.score > y.score, # comparison function used to determine "best" checkpoint (x is the current checkpoint; y is the previously copied checkpoint with the highest/worst score)
             sort_key_fn=lambda x: x.score,
             sort_reverse=True) # sort order when discarding excess checkpoints
-        eval_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(val_file_list, batch_size=args.batch_size, num_epochs=1, task_num=args.task_num), steps=None, exporters=best_copier, start_delay_secs=120, throttle_secs=180)
+        eval_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(val_file_list, batch_size=args.batch_size, num_epochs=1, task_num=args.task_num), steps=None, exporters=best_copier, start_delay_secs=1, throttle_secs=1)
         tf.estimator.train_and_evaluate(MTL, train_spec, eval_spec)          
     elif is_eval:
         MTL = tf.estimator.Estimator(model_fn=model_fn, model_dir=out_model_dir, params={'args': args}, config=c)

@@ -2,7 +2,7 @@ set -x
 rm -rf ckpt
 
 i="0"
-iter="5"
+iter="10"
 mkdir logs
 wait_function () {
     sleep 10

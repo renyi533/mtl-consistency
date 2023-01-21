@@ -91,11 +91,11 @@ def parse_args():
                         help='train or test')
     parser.add_argument('--model_dir', type=str, default='./ckpt',
                         help='model dir')
-    parser.add_argument('--train_data_dir', type=str, default='./data/ali-ccp/train',
+    parser.add_argument('--train_data_dir', type=str, default='./data/video_games/train',
                         help='training data directory')
-    parser.add_argument('--test_data_dir', type=str, default='./data/ali-ccp/test',
+    parser.add_argument('--test_data_dir', type=str, default='./data/video_games/test',
                         help='test data directory')
-    parser.add_argument('--val_data_dir', type=str, default='./data/ali-ccp/val',
+    parser.add_argument('--val_data_dir', type=str, default='./data/video_games/val',
                         help='validation data directory')
     parser.add_argument('--pred_file', type=str, default='./pred.csv',
                         help='pred results')

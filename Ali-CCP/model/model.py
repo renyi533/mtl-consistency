@@ -172,6 +172,10 @@ def model(dnn_inputs, args, mode):
         task_tower_inputs = ple(dnn_inputs, args, mode)
     elif args.model == 'snr':
         task_tower_inputs, snr_l0_loss = snr(dnn_inputs, args, mode)
+    elif args.model == 'se':
+        task_tower_inputs = shared_embedding(dnn_inputs, args, mode)
+    elif args.model == 'sb':
+        task_tower_inputs = shared_bottom(dnn_inputs, args, mode)
     elif args.model == 'aitm':
         return aitm(dnn_inputs, args), snr_l0_loss
     else:
@@ -216,6 +220,14 @@ def mmoe(dnn_inputs, args, mode):
         task_tower_inputs.append(task_input)
 
     return task_tower_inputs
+
+def shared_embedding(dnn_inputs, args, mode):
+    task_inputs = expert_layer([dnn_inputs] * args.task_num, args, mode, expert_num = args.task_num)
+    return task_inputs
+
+def shared_bottom(dnn_inputs, args, mode):
+    task_inputs = expert_layer([dnn_inputs], args, mode, expert_num = 1)   
+    return task_inputs * args.task_num    
 
 def ple(dnn_inputs, args, mode):
     layer_inputs = [dnn_inputs] * args.expert_num
@@ -301,9 +313,11 @@ def snr(dnn_inputs, args, mode):
     task_tower_inputs, snr_l0_loss = _SNR(dnn_inputs) 
     return task_tower_inputs, snr_l0_loss
 
-def expert_layer(expert_inputs, args, mode):
+def expert_layer(expert_inputs, args, mode, expert_num=None):
     all_experts = []
-    for i in range(args.expert_num):
+    if expert_num is None:
+        expert_num = args.expert_num
+    for i in range(expert_num):
         expert_input = expert_inputs[i]
         for j, node_num in enumerate(args.expert_layers):
             expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
@@ -311,15 +325,8 @@ def expert_layer(expert_inputs, args, mode):
                 expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
         all_experts.append(expert_input)    
     return all_experts
-        
-def model_fn(features, labels, mode=None, params=None):
- 
-    args = params['args']
-    feat_dnn, size = features['feat'],  features['size']
-    task_labels = []
-    for i in range(args.task_num):
-        task_labels.append(features['label%d' % (i)])
 
+def gen_embeddings(feat_dnn, args, idx=0):
     uniq_feature_cnt = args.uniq_feature_cnt
     slot_cnt = len(uniq_feature_cnt)
     dnn_inputs = []
@@ -328,7 +335,7 @@ def model_fn(features, labels, mode=None, params=None):
     with tf.variable_scope("model"):
         for i in range(slot_cnt):
             vocab_size = uniq_feature_cnt[i]
-            DEEP_V = tf.get_variable(name='emb_%d' % i, 
+            DEEP_V = tf.get_variable(name='emb_%d_%d' % (i, idx), 
                                      shape=[vocab_size, args.embedding_dim], 
                                      regularizer=l2_reg,
                                      initializer=tf.random_normal_initializer(mean=0.0, stddev=0.01))
@@ -338,15 +345,44 @@ def model_fn(features, labels, mode=None, params=None):
 
         dnn_inputs = tf.concat(dnn_inputs, axis=-1) 
         dnn_inputs = tf.squeeze(dnn_inputs, axis=-2)
-        
+    return dnn_inputs
+ 
+def single_task_model(dnn_inputs, args, mode):
+    task_outputs = []
+    for i in range(args.task_num):
+        task_input = dnn_inputs[i]
+        for j, node_num in enumerate(args.expert_layers + args.task_layers):
+            task_input = tf.layers.dense(task_input, node_num, activation=tf.nn.relu)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                task_input = tf.nn.dropout(task_input, keep_prob=args.keep_prob[1])
+
+        task_out = tf.layers.dense(task_input, 1, activation=tf.identity, use_bias=True)
+        task_outputs.append(task_out)
+    return task_outputs, 0.0
+                       
+def model_fn(features, labels, mode=None, params=None):
+ 
+    args = params['args']
+    feat_dnn, size = features['feat'],  features['size']
+    task_labels = []
+    for i in range(args.task_num):
+        task_labels.append(features['label%d' % (i)])
+
+    if args.model != 'st':
+        dnn_inputs =  gen_embeddings(feat_dnn, args, 0)
         task_outputs, snr_l0_loss = model(dnn_inputs, args, mode)
-        task_preds = []
-        for i in range(args.task_num):
-            if args.task_loss[i] == 'xent':
-                pred = tf.sigmoid(task_outputs[i])
-            else:
-                pred = task_outputs[i]
-            task_preds.append(pred)
+    else:
+        dnn_inputs = [gen_embeddings(feat_dnn, args, i)
+                      for i in range(args.task_num)]  
+        task_outputs, snr_l0_loss = single_task_model(dnn_inputs, args, mode)     
+        
+    task_preds = []
+    for i in range(args.task_num):
+        if args.task_loss[i] == 'xent':
+            pred = tf.sigmoid(task_outputs[i])
+        else:
+            pred = task_outputs[i]
+        task_preds.append(pred)
     
     predictions = {}
     for i in range(args.task_num):

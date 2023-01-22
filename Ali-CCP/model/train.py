@@ -53,13 +53,15 @@ def parse_args():
                         help='task layers.')
     parser.add_argument('--embedding_dim', type=int, default=5,
                         help='Number of embedding dim.')
-    parser.add_argument('--ple_layer_cnt', type=int, default=2,
-                        help='Number of ple layers.')
-    parser.add_argument('--snr_layer_cnt', type=int, default=2,
-                        help='Number of snr layers.')
+    parser.add_argument('--ple_level_cnt', type=int, default=2,
+                        help='Number of bottom levels.')
+    parser.add_argument('--snr_level_cnt', type=int, default=1,
+                        help='Number of bottom levels.')
+    parser.add_argument('--mssm_level_cnt', type=int, default=1,
+                        help='Number of bottom levels.')
     parser.add_argument('--lamda', type=float, default=1e-6,
                         help='Regularizer weight.')
-    parser.add_argument('--snr_l0_loss_weight', type=float, default=0.0001,
+    parser.add_argument('--snr_l0_loss_weight', type=float, default=1e-6,
                         help='snr sparsity Regularizer weight.')
     parser.add_argument('--snr_lower', type=float, default=-1.0,
                         help='snr lower.')
@@ -69,6 +71,8 @@ def parse_args():
                         help='snr temperature.')
     parser.add_argument('--snr_mode', type=str, default='trans',
                         help='snr mode: trans or aver.')
+    parser.add_argument('--enable_fscm', type=str2bool, default=False,
+                        help='Whether to use fscm in mssm')
     parser.add_argument('--keep_prob', type=str2floatlist, default=[1.0,1.0,1.0],
                         help='Keep probability. 1: no dropout.')
     parser.add_argument('--lr', type=float, default=1e-3,
@@ -208,6 +212,7 @@ def main(_):
 if __name__ == '__main__':
     tf.logging.set_verbosity(tf.logging.INFO)
     tf.app.run()
+
 
 
 

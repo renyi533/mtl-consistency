@@ -166,12 +166,17 @@ def aitm(feature_embedding, args):
      
 def model(dnn_inputs, args, mode):
     snr_l0_loss = 0.0
+    print('start to train model:%s' % args.model)
     if args.model == 'mmoe':
         task_tower_inputs = mmoe(dnn_inputs, args, mode)
     elif args.model == 'ple':
         task_tower_inputs = ple(dnn_inputs, args, mode)
+    elif args.model == 'mssm':
+        task_tower_inputs, snr_l0_loss = mssm(dnn_inputs, args, mode, args.mssm_level_cnt)
+    elif args.model == 'snr_v2':
+        task_tower_inputs, snr_l0_loss = mssm(dnn_inputs, args, mode, args.snr_level_cnt, False, False)
     elif args.model == 'snr':
-        task_tower_inputs, snr_l0_loss = snr(dnn_inputs, args, mode)
+        task_tower_inputs, snr_l0_loss = snr_v1(dnn_inputs, args, mode)
     elif args.model == 'se':
         task_tower_inputs = shared_embedding(dnn_inputs, args, mode)
     elif args.model == 'sb':
@@ -232,8 +237,8 @@ def shared_bottom(dnn_inputs, args, mode):
 def ple(dnn_inputs, args, mode):
     layer_inputs = [dnn_inputs] * args.expert_num
     layer_outputs = [dnn_inputs] * args.expert_num
-    assert args.ple_layer_cnt >= 1
-    for k in range(args.ple_layer_cnt):
+    assert args.ple_level_cnt >= 1
+    for k in range(args.ple_level_cnt):
         all_experts = expert_layer(layer_inputs, args, mode)
         layer_outputs = []
         for i in range(args.expert_num):
@@ -241,7 +246,7 @@ def ple(dnn_inputs, args, mode):
                 task_experts = [all_experts[i]]
                 task_experts.extend([all_experts[j] for j in range(args.task_num, args.expert_num)])
             else:
-                if k < args.ple_layer_cnt - 1:
+                if k < args.ple_level_cnt - 1:
                     task_experts = [all_experts[j] for j in range(args.expert_num)]
                 else: # do not need update shared experts at last layer
                     break
@@ -255,45 +260,106 @@ def ple(dnn_inputs, args, mode):
         layer_inputs = layer_outputs
             
     return layer_outputs[:args.task_num]
-    
-def snr(dnn_inputs, args, mode):
-    def l0_norm(target, temperature, lower, higher):
-        """Returns the L0 norm."""
-        offsets = temperature * tf.math.log(-lower / higher)
-        dense_probs = tf.nn.sigmoid(target - offsets)
-        return tf.reduce_mean(tf.reduce_sum(dense_probs, axis=-1, keepdims = True))
-        #return tf.reduce_mean(target - offsets)
 
-    def hard_sigmoid(target, lower, higher):
-        """Stretches and clips sigmoid samples between 0 and 1."""
-        samples = tf.nn.sigmoid(target) * (higher - lower) + lower
-        return tf.clip_by_value(samples, 0., 1.)
+def l0_norm(target, temperature, lower, higher):
+    """Returns the L0 norm."""
+    offsets = temperature * tf.math.log(-lower / higher)
+    dense_probs = tf.nn.sigmoid(target - offsets)
+    # structure is sample independent, just reduce sum
+    return tf.reduce_sum(dense_probs)
 
-    def sample(target, temperature, lower, higher, mode, eps=1e-20):
-        U = tf.random.uniform(tf.shape(target, out_type=tf.int32), minval=0, maxval=1, dtype=tf.float32)
-        sample = (tf.math.log(U + eps) - tf.math.log((1 - U) + eps) + target)/temperature
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            sample = sample
+def hard_sigmoid(target, lower, higher):
+    """Stretches and clips sigmoid samples between 0 and 1."""
+    samples = tf.nn.sigmoid(target) * (higher - lower) + lower
+    return tf.clip_by_value(samples, 0., 1.)
+
+def sample(target, temperature, lower, higher, mode, eps=1e-20):
+    U = tf.random.uniform(tf.shape(target, out_type=tf.int32), minval=0, maxval=1, dtype=tf.float32)
+    sample = (tf.math.log(U + eps) - tf.math.log((1 - U) + eps) + target)/temperature
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        sample = sample
+    else:
+        sample = target 
+    return hard_sigmoid(sample, lower, higher)    
+
+def mssm(dnn_inputs, args, mode, level_cnt, cell_level=True, task_specific=True):
+    snr_l0_loss = 0
+    if args.enable_fscm:
+        uniq_feature_cnt = args.uniq_feature_cnt
+        slot_cnt = len(uniq_feature_cnt)
+        features = tf.split(dnn_inputs, num_or_size_splits=slot_cnt, axis=-1) 
+        layer_inputs = []
+        for i in range(args.expert_num):
+            expert_inputs = []
+            for j in range(len(features)):
+                w_i_j = tf.layers.dense(features[j], 1, use_bias=False, activation=tf.nn.tanh)
+                w_i_j = tf.nn.relu(w_i_j)
+                expert_inputs.append(w_i_j * features[j])
+            fscm_out = tf.layers.dense(tf.concat(expert_inputs, axis=-1), 
+                                       args.expert_layers[-1],
+                                       use_bias=False,
+                                       activation=tf.identity)
+            layer_inputs.append(fscm_out)
+    else:
+        layer_inputs = expert_layer([dnn_inputs]*args.expert_num, args, mode)        
+    layer_outputs = []
+    assert level_cnt >= 1
+    for k in range(level_cnt):
+        layer_outputs = []
+        if k == level_cnt - 1:
+            next_expert_num = args.task_num
         else:
-            sample = target 
-        return hard_sigmoid(sample, lower, higher)
+            next_expert_num = args.expert_num
+        for i in range(next_expert_num):
+            if i < args.task_num and task_specific:
+                task_inputs = [layer_inputs[i]]
+                task_inputs.extend([layer_inputs[j] for j in range(args.task_num, args.expert_num)])
+            else:
+                task_inputs = [layer_inputs[j] for j in range(args.expert_num)]
+            if cell_level:
+                log_alpha = tf.get_variable('log_alpha_{0}_{1}'.format(k, i), 
+                                            shape=(len(task_inputs), args.expert_layers[-1]), 
+                                            initializer=tf.constant_initializer(-0.5),
+                                            dtype=tf.float32)
+            else:
+                log_alpha = tf.get_variable('log_alpha_{0}_{1}'.format(k, i), 
+                                            shape=(len(task_inputs), 1), 
+                                            initializer=tf.constant_initializer(-0.5),
+                                            dtype=tf.float32)
 
+            snr_l0_loss += l0_norm(log_alpha, args.snr_temperature, args.snr_lower, args.snr_higher)
+            route = sample(log_alpha, args.snr_temperature, args.snr_lower, args.snr_higher, mode) 
+            route = tf.expand_dims(route, axis=0)
+            if args.snr_mode == 'trans':
+                out_to_upper = [tf.layers.dense(e, args.expert_layers[-1], 
+                                           use_bias=False,
+                                           activation=tf.identity) for e in task_inputs]
+            else:
+                out_to_upper = task_inputs
+            out_to_upper = tf.stack(out_to_upper, axis=1)
+            out_to_upper = out_to_upper * route
+            net_input = tf.reduce_sum(out_to_upper, axis=1)
+            layer_outputs.append(net_input) 
+        layer_inputs = layer_outputs
+    return layer_outputs, snr_l0_loss
+
+def snr(dnn_inputs, args, mode):
     def _SNR(dnn_inputs):
         snr_l0_loss = 0
-        layer_inputs = [dnn_inputs] * args.expert_num
-        layer_outputs = [dnn_inputs] * args.expert_num
-        assert args.snr_layer_cnt > 1
-        for k in range(args.snr_layer_cnt):
+        layer_inputs = dnn_inputs
+        layer_outputs = []
+        assert args.snr_level_cnt >= 1
+        for k in range(args.snr_level_cnt):
             all_experts = expert_layer(layer_inputs, args, mode)
             layer_outputs = []
-            if k == args.snr_layer_cnt - 1:
+            if k == args.snr_level_cnt - 1:
                 next_expert_num = args.task_num
             else:
                 next_expert_num = args.expert_num
             for i in range(next_expert_num):
                 log_alpha = tf.get_variable('log_alpha_{0}_{1}'.format(k, i), 
                                                       shape=(1, args.expert_num), 
-                                                      initializer=tf.constant_initializer(-0.5),
+                                                      initializer=tf.keras.initializers.glorot_uniform(),
                                                       dtype=tf.float32)
                 snr_l0_loss += l0_norm(log_alpha, args.snr_temperature, args.snr_lower, args.snr_higher)
                 route = sample(log_alpha, args.snr_temperature, args.snr_lower, args.snr_higher, mode) 
@@ -309,8 +375,63 @@ def snr(dnn_inputs, args, mode):
                 layer_outputs.append(net_input) 
             layer_inputs = layer_outputs
         return layer_outputs, snr_l0_loss
-
+    dnn_inputs = dnn_inputs if isinstance(dnn_inputs, list) else [dnn_inputs] * args.expert_num
     task_tower_inputs, snr_l0_loss = _SNR(dnn_inputs) 
+    return task_tower_inputs, snr_l0_loss
+        
+def snr_v1(dnn_inputs, args, mode):
+    def l0_norm(target, temperature, lower, higher):
+        """Returns the L0 norm."""
+        offsets = temperature * tf.math.log(-lower / higher)
+        dense_probs = tf.nn.sigmoid(target - offsets)
+        return tf.reduce_mean(tf.reduce_sum(dense_probs, axis=-1, keepdims = True))
+    def hard_sigmoid(target, lower, higher):
+        """Stretches and clips sigmoid samples between 0 and 1."""
+        samples = tf.nn.sigmoid(target) * (higher - lower) + lower
+        return tf.clip_by_value(samples, 0., 1.)
+    def sample(target, temperature, lower, higher, mode, eps=1e-20):
+        U = tf.random.uniform(tf.shape(target, out_type=tf.int32), minval=0, maxval=1, dtype=tf.float32)
+        sample = (tf.math.log(U + eps) - tf.math.log((1 - U) + eps) + target)/temperature
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            sample = sample
+        else:
+            sample = target 
+        return hard_sigmoid(sample, lower, higher)
+    def _SNR(input_layer, snr_layers):
+        snr_l0_loss = 0
+        for i, pair in enumerate(snr_layers) :
+            node_num = pair[0]
+            net_num = pair[1]
+            next_layer = []
+            if i != 0:
+                for j in range(net_num):
+                    log_alpha = tf.compat.v1.get_variable('log_alpha_{0}_{1}'.format(i, j), shape=(1, route_num), initializer=tf.constant_initializer(-0.5), dtype=tf.float32)    
+                    snr_l0_loss += l0_norm(log_alpha, config.SNR_temperature, config.SNR_lower, config.SNR_higher)
+                    route = sample(log_alpha, config.SNR_temperature, config.SNR_lower, config.SNR_higher, mode) 
+                    route = tf.expand_dims(route, axis=1)
+                    if args.snr_mode == 'trans':
+                        input_layer = [tf.layers.dense(net, node_num, 
+                                                       use_bias=False,
+                                                       activation=tf.identity) for net in input_layer]
+                    else:
+                        assert args.snr_mode == 'aver'
+                    net_input = tf.stack(input_layer, axis=1)
+                    net_input = tf.squeeze(tf.matmul(route, net_input), axis=1)
+                    next_layer.append(net_input) 
+                input_layer = next_layer
+                route_num = net_num
+            else:
+                route_num = net_num
+        return next_layer, snr_l0_loss
+    all_experts = []
+    for i in range(args.expert_num):
+        expert_input = dnn_inputs
+        for j, node_num in enumerate(args.expert_layers):
+            expert_input = tf.layers.dense(expert_input, node_num, activation=tf.nn.relu)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                expert_input = tf.nn.dropout(expert_input, keep_prob=args.keep_prob[0])
+        all_experts.append(expert_input)
+    task_tower_inputs, snr_l0_loss = _SNR(all_experts, config.SNR_layers) 
     return task_tower_inputs, snr_l0_loss
 
 def expert_layer(expert_inputs, args, mode, expert_num=None):
@@ -369,9 +490,11 @@ def model_fn(features, labels, mode=None, params=None):
         task_labels.append(features['label%d' % (i)])
 
     if args.model != 'st':
+        print('train multi-task models with shared embeddings')
         dnn_inputs =  gen_embeddings(feat_dnn, args, 0)
         task_outputs, snr_l0_loss = model(dnn_inputs, args, mode)
     else:
+        print('train single task models with separate embeddings')
         dnn_inputs = [gen_embeddings(feat_dnn, args, i)
                       for i in range(args.task_num)]  
         task_outputs, snr_l0_loss = single_task_model(dnn_inputs, args, mode)     
@@ -452,6 +575,7 @@ def model_fn(features, labels, mode=None, params=None):
 
 if __name__ == '__main__':
     train_file_list = sys.argv[1]
+
 
 
 

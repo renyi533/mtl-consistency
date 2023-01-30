@@ -81,7 +81,8 @@ def task_consistency(task_logits_inputs, args, mode):
                 act_func = tf.nn.relu
             layer_input = tf.layers.dense(layer_input, args.task_layers[-1], activation=act_func)
         experience_weight = layer_input
-        task_input = task_input + experience_weight * info_from_global
+        task_input = experience_weight * info_from_global
+        #task_input = task_input + experience_weight * info_from_global
         task_out = tf.layers.dense(task_input, 1, activation=tf.identity, use_bias=False)
         task_outputs.append(task_out)
     return task_outputs
